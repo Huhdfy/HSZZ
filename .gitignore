@@ -1,0 +1,12 @@
+ideas/
+*.DS_store
+src/clahser_new/cr_logs/
+.idea/
+/runs/
+/.upload_hszz/
+.claude/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.xml
+*.iml

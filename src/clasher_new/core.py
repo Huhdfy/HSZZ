@@ -1,0 +1,45 @@
+from dataclasses import dataclass
+import math
+
+@dataclass
+class Position:
+    x: float
+    y: float
+    def distance_to(self, other):
+        return math.hypot(self.x-other.x, self.y-other.y)
+
+class BlankEntity:
+    """A placeholder that only encodes the position value."""
+    def __init__(self, position):
+        self.position = position
+
+class BasicCharacter:
+    def __init__(self, entity):
+        self.entity = entity
+        self.battle_state = self.entity.battle_state
+        self.data = self.entity.data
+    def on_spawn(self): pass
+    def on_tick(self, dt): self.battle_state = self.entity.battle_state
+    def on_death(self): pass
+    def on_attack(self, current_target=None):
+        if self.entity.data.damage:
+            #能造成伤害 or 此帧造成伤害？
+            if self.entity.data.area_damage_radius:
+                # 若AOE伤害
+                self.battle_state.deal_area_damage(self.entity.player, self.entity.position, self.data.area_damage_radius,
+                                                   self.data.damage,
+                                                   self.data.attack_air, self.data.attack_ground)
+            else:
+                # 有无防御塔
+                if 'King' in current_target.name:
+                    current_target.take_damage(self.data.damage*self.entity.data.tower_damage_mult, delayed=True)
+                else:
+                    current_target.take_damage(self.data.damage, delayed=True)
+        elif self.entity.data.projectiles:
+            # must have projectiles 炮弹
+            self.entity.create_projectile(current_target)
+        self.entity.attack_cooldown = self.data.hit_speed
+        # 重置冷却时间
+        if self.entity.data.kamikaze:
+            # 自毁
+            self.entity.is_alive = False

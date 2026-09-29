@@ -1,0 +1,156 @@
+from dataclasses import dataclass
+from core import Position
+import math
+
+# 以整格坐标缓存可行走性；静态地图无需每次重复判断河流和障碍。
+walkable_cache = {}
+
+@dataclass
+class TileGrid:
+    """竞技场的静态几何规则：边界、河流、桥梁、塔位和部署区域。"""
+    width, height = 18, 32
+    tile_size: float = 100.0
+    BLUE_KING_TOWER = Position(9.0, 3.0)     # King tower centered at x=9 (middle of 18-wide arena)
+    BLUE_LEFT_TOWER = Position(3.5, 6.5)     # Left princess tower
+    BLUE_RIGHT_TOWER = Position(14.5, 6.5)   # Right princess tower (corrected for better symmetry)
+    RED_KING_TOWER = Position(9.0, 29.0)     # King tower centered at x=9
+    RED_LEFT_TOWER = Position(3.5, 25.5)     # Left princess tower  
+    RED_RIGHT_TOWER = Position(14.5, 25.5)   # Right princess tower (corrected for better symmetry)
+    LEFT_BRIDGE = Position(3.5, 16.0)   # Left bridge center of center tile (tiles 2,3,4 -> center at 3.5)
+    RIGHT_BRIDGE = Position(14.5, 16.0) # Right bridge center of center tile (tiles 13,14,15 -> center at 14.5)
+    RIVER_Y1 = 15.0
+    RIVER_Y2 = 16.0
+    BLOCKED_TILES = [
+        
+        # Top row (y=0): 6 gray fences (0-5), 6 green king area (6-11), 6 gray fences (12-17)
+        (0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0),           # Left 6 gray fence tiles
+        (12, 0), (13, 0), (14, 0), (15, 0), (16, 0), (17, 0),     # Right 6 gray fence tiles
+        
+        # Bottom row (y=31): 6 gray fences (0-5), 6 green king area (6-11), 6 gray fences (12-17)
+        (0, 31), (1, 31), (2, 31), (3, 31), (4, 31), (5, 31),     # Left 6 gray fence tiles
+        (12, 31), (13, 31), (14, 31), (15, 31), (16, 31), (17, 31), # Right 6 gray fence tiles
+    ]
+
+    # 元组依次为：塔中心坐标、占用半径、所属玩家 ID。
+    towers = [
+        (BLUE_LEFT_TOWER, 1, 0),  # Princess tower, 3x3
+        (BLUE_RIGHT_TOWER, 1, 0),  # Princess tower, 3x3
+        (BLUE_KING_TOWER, 1.4, 0),  # King tower, 4x4
+        (RED_LEFT_TOWER, 1, 1),  # Princess tower, 3x3
+        (RED_RIGHT_TOWER, 1, 1),  # Princess tower, 3x3
+        (RED_KING_TOWER, 1.4, 1)  # King tower, 4x4
+    ]
+    def is_valid_position(self, pos):
+        """判断坐标是否仍位于 18×32 的竞技场边界内。"""
+        return 0 <= pos.x < self.width and 0 <= pos.y < self.height
+    
+    def is_blocked_tile(self, x: int, y: int) -> bool:
+        """判断整格是否是围栏或不可通行的河道边缘。"""
+        return (x, y) in self.BLOCKED_TILES
+    
+    def is_walkable(self, pos: Position) -> bool:
+        """判断地面单位能否走到该坐标；过河只能经过两座桥。"""
+        x, y = pos.x, pos.y
+        int_pos = (int(x), int(y))
+        if int_pos in walkable_cache:
+            return walkable_cache[int_pos]
+        if not self.is_valid_position(pos) or self.is_blocked_tile(int(pos.x), int(pos.y)):
+            walkable_cache[int_pos] = False
+        else:
+            walkable_cache[int_pos] = True
+        return walkable_cache[int_pos]
+
+    def _is_tower_alive(self, tower_pos: Position, player_id: int, battle_state) -> bool:
+        """从战斗状态中查找指定塔，并确认它是否仍存活。"""
+        for entity in battle_state.entities.values():
+            if (hasattr(entity, 'position') and
+                entity.position.x == tower_pos.x and
+                entity.position.y == tower_pos.y and
+                getattr(entity, 'player_id', -1) == player_id):
+                return entity.is_alive
+        return False  # Tower not found, assume dead
+
+    def is_tower_tile(self, pos: Position, battle_state=None) -> bool:
+        """判断坐标是否落入任一存活塔的占地半径，供部署限制使用。"""
+        for tower_pos, radius, player_id in self.towers:
+            # Check if tower is still alive (if battle_state provided)
+            if battle_state:
+                tower_alive = self._is_tower_alive(tower_pos, player_id, battle_state)
+                if not tower_alive:
+                    continue
+            dx = abs(pos.x - tower_pos.x)
+            dy = abs(pos.y - tower_pos.y)
+            if math.hypot(dx, dy) <= radius:
+                return True
+
+        return False
+    
+    def get_deploy_zones(self, player_id: int, battle_state=None):
+        """返回玩家的可部署矩形 ``(x1, y1, x2, y2)``。
+
+        基础区域在己方半场；敌方公主塔被摧毁后，对应半边额外开放
+        河道后的四格纵深，模拟皇家战争的推进式部署规则。
+        """
+        zones = []
+        
+        if player_id == 0:  # Player 0 (bottom half)
+            # Basic deployment zone (bottom half, excluding river)
+            zones.append((0, 1, self.width, self.RIVER_Y1))  # y=1 to y=14
+            zones.append((6, 0, 12, 6))  # Behind blue king: x=6-11, y=0-5 (6 tiles behind own king, including edge row)
+            if battle_state:
+                # If red left tower is destroyed, blue player can spawn on left half of arena and 4 tiles back
+                if battle_state.players[1].left_tower_hp <= 0:
+                    zones.append((0, self.RIVER_Y2 + 1, 9, self.RIVER_Y2 + 5))  # Left half: x=0-8, y=17-20
+                # If red right tower is destroyed, blue player can spawn on right half of arena and 4 tiles back  
+                if battle_state.players[1].right_tower_hp <= 0:
+                    zones.append((9, self.RIVER_Y2 + 1, self.width, self.RIVER_Y2 + 5))  # Right half: x=9-17, y=17-20
+        else:  # Player 1 (top half)
+            zones.append((0, self.RIVER_Y2 + 1, self.width, 31))  # y=17 to y=30
+            zones.append((6, 26, 12, 32))  # Behind red king: x=6-11, y=26-31 (6 tiles behind own king, including edge row)
+            if battle_state:
+                # If blue left tower is destroyed, red player can spawn on left half of arena and 4 tiles back
+                if battle_state.players[0].left_tower_hp <= 0:
+                    zones.append((0, self.RIVER_Y1 - 4, 9, self.RIVER_Y1))  # Left half: x=0-8, y=11-14
+                # If blue right tower is destroyed, red player can spawn on right half of arena and 4 tiles back
+                if battle_state.players[0].right_tower_hp <= 0:
+                    zones.append((9, self.RIVER_Y1 - 4, self.width, self.RIVER_Y1))  # Right half: x=9-17, y=11-14
+        return zones
+    
+    def can_deploy_at(self, pos: Position, player_id: int, battle_state=None, is_spell=False, spell_obj=None) -> bool:
+        """综合边界、障碍、塔占地和阵营部署区，验证一次部署是否允许。"""
+        # Check basic bounds
+        if not self.is_valid_position(pos) or self.is_blocked_tile(int(pos.x), int(pos.y)): return False
+        # 单位不能放在塔上；普通法术不受己方部署区域限制。
+        if not is_spell and self.is_tower_tile(pos, battle_state): return False
+        if is_spell and not self._is_rolling_projectile_spell(spell_obj): return True
+        if (pos.y == 0 or pos.y == 31) and not (6 <= pos.x <= 11): return False
+        zones = self.get_deploy_zones(player_id, battle_state)
+        for x1, y1, x2, y2 in zones:
+            if x1 <= pos.x < x2 and y1 <= pos.y < y2:
+                return True
+        if player_id == 0 and pos.y == 0 and 6 <= pos.x <= 11:
+            return True
+        elif player_id == 1 and pos.y == 31 and 6 <= pos.x <= 11:
+            return True
+        return False
+
+    def get_tower_blocked_x_ranges(self, y: float, battle_state=None):
+        """给定横向扫描线，返回被存活塔占用的所有 X 区间。"""
+        blocked_ranges = []
+        for tower_pos, radius, player_id in self.towers:
+            # Check if tower is still alive
+            if battle_state:
+                tower_alive = self._is_tower_alive(tower_pos, player_id, battle_state)
+                if not tower_alive:
+                    continue
+            # Check if Y coordinate intersects with tower area
+            dy = abs(y - tower_pos.y)
+            if dy <= radius:
+                # Y coordinate overlaps with tower, add X range to blocked list
+                x_min = tower_pos.x - radius
+                x_max = tower_pos.x + radius
+                blocked_ranges.append((x_min, x_max))
+        return blocked_ranges
+
+if __name__ == '__main__':
+    print(TileGrid().is_blocked_tile(int(6.9), int(16.001)))
